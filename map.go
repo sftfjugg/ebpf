@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -191,6 +192,10 @@ func (ms *MapSpec) readOnly() bool {
 	return (ms.Flags & sys.BPF_F_RDONLY_PROG) > 0
 }
 
+func (ms *MapSpec) writeOnly() bool {
+	return (ms.Flags & sys.BPF_F_WRONLY_PROG) > 0
+}
+
 // MapKV is used to initialize the contents of a Map.
 type MapKV struct {
 	Key   interface{}
@@ -255,6 +260,8 @@ type Map struct {
 	pinnedPath string
 	// Per CPU maps return values larger than the size in the spec
 	fullValueSize int
+
+	memory *Memory
 }
 
 // NewMapFromFD creates a map from a raw fd.
@@ -388,6 +395,44 @@ func newMapWithOptions(spec *MapSpec, opts MapOptions) (_ *Map, err error) {
 	return m, nil
 }
 
+// Memory returns a memory-mapped region for the Map. Operations are
+// concurrency-safe since the object doesn't maintain any state. Repeated calls
+// to Memory return the same mapping.
+//
+// Callers are responsible for coordinating access to the resulting Memory.
+func (m *Map) Memory() (*Memory, error) {
+	if m.memory != nil {
+		return m.memory, nil
+	}
+
+	if m.flags&unix.BPF_F_MMAPABLE == 0 {
+		return nil, fmt.Errorf("Map was not created with the BPF_F_MMAPABLE flag")
+	}
+
+	var ro bool
+	flags := unix.PROT_READ | unix.PROT_WRITE
+	if m.flags&unix.BPF_F_RDONLY_PROG > 0 {
+		ro = true
+		flags = unix.PROT_READ
+	}
+
+	//TODO: Size calc is different for arena maps, add helper to *Map.
+	b, err := unix.Mmap(m.FD(), 0, int(m.ValueSize()*m.MaxEntries()), flags, unix.MAP_SHARED)
+	if err != nil {
+		return nil, fmt.Errorf("setting up memory-mapped region: %w", err)
+	}
+
+	mm := &Memory{
+		b,
+		ro,
+	}
+	runtime.SetFinalizer(mm, (*Memory).close)
+
+	m.memory = mm
+
+	return mm, nil
+}
+
 // createMap validates the spec's properties and creates the map in the kernel
 // using the given opts. It does not populate or freeze the map.
 func (spec *MapSpec) createMap(inner *sys.FD) (_ *Map, err error) {
@@ -410,6 +455,11 @@ func (spec *MapSpec) createMap(inner *sys.FD) (_ *Map, err error) {
 	spec, err = spec.fixupMagicFields()
 	if err != nil {
 		return nil, err
+	}
+
+	// TODO: Do this properly.
+	if haveMmapableMaps() == nil && isDataSection(spec.Name) {
+		spec.Flags |= sys.BPF_F_MMAPABLE
 	}
 
 	attr := sys.MapCreateAttr{
@@ -479,13 +529,13 @@ func handleMapCreateError(attr sys.MapCreateAttr, spec *MapSpec, err error) erro
 		return fmt.Errorf("map create: %w (noPrealloc flag may be incompatible with map type %s)", err, spec.Type)
 	}
 
-	switch spec.Type {
-	case ArrayOfMaps, HashOfMaps:
+	if spec.Type.canStoreMap() {
 		if haveFeatErr := haveNestedMaps(); haveFeatErr != nil {
 			return fmt.Errorf("map create: %w", haveFeatErr)
 		}
 	}
-	if spec.Flags&(sys.BPF_F_RDONLY_PROG|sys.BPF_F_WRONLY_PROG) > 0 {
+
+	if spec.readOnly() || spec.writeOnly() {
 		if haveFeatErr := haveMapMutabilityModifiers(); haveFeatErr != nil {
 			return fmt.Errorf("map create: %w", haveFeatErr)
 		}
@@ -531,6 +581,7 @@ func newMap(fd *sys.FD, name string, typ MapType, keySize, valueSize, maxEntries
 		flags,
 		"",
 		int(valueSize),
+		nil,
 	}
 
 	if !typ.hasPerCPUValue() {
@@ -1337,6 +1388,7 @@ func (m *Map) Clone() (*Map, error) {
 		m.flags,
 		"",
 		m.fullValueSize,
+		nil,
 	}, nil
 }
 
