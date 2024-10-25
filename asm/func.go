@@ -1,12 +1,21 @@
 package asm
 
+import (
+	"runtime"
+
+	"github.com/cilium/ebpf/internal"
+)
+
 //go:generate go run golang.org/x/tools/cmd/stringer@latest -output func_string.go -type=BuiltinFunc
 
 // BuiltinFunc is a built-in eBPF function.
-type BuiltinFunc int32
+type BuiltinFunc uint32
 
-func (_ BuiltinFunc) Max() BuiltinFunc {
-	return maxBuiltinFunc - 1
+func (BuiltinFunc) Max() BuiltinFunc {
+	if runtime.GOOS == "windows" {
+		return 0
+	}
+	return maxLinuxBuiltinFunc - 1
 }
 
 // eBPF built-in functions
@@ -25,7 +34,7 @@ func (_ BuiltinFunc) Max() BuiltinFunc {
 //
 // The script expects include/uapi/linux/bpf.h as it's input.
 const (
-	FnUnspec BuiltinFunc = iota
+	FnUnspec BuiltinFunc = BuiltinFunc(((internal.Linux - 1) << internal.PlatformShift) | iota)
 	FnMapLookupElem
 	FnMapUpdateElem
 	FnMapDeleteElem
@@ -238,8 +247,16 @@ const (
 	FnCgrpStorageGet
 	FnCgrpStorageDelete
 
-	maxBuiltinFunc
+	maxLinuxBuiltinFunc
 )
+
+func BuiltinFuncForPlatform(p internal.Platform, value uint32) (BuiltinFunc, error) {
+	return internal.EncodePlatformConstant[BuiltinFunc](p, value)
+}
+
+func (fn BuiltinFunc) Decode() (internal.Platform, uint32) {
+	return internal.DecodePlatformConstant(fn)
+}
 
 // Call emits a function call.
 func (fn BuiltinFunc) Call() Instruction {
