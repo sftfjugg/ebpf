@@ -1,20 +1,20 @@
 name: ci
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 env:
   TMPDIR: /tmp
-  CI_MAX_KERNEL_VERSION: '6.8'
-  CI_MIN_CLANG_VERSION: '11'
-  go_version: '~1.23'
-  prev_go_version: '~1.22'
-  CGO_ENABLED: '0'
+  CI_MAX_KERNEL_VERSION: "6.8"
+  CI_MIN_CLANG_VERSION: "11"
+  go_version: "~1.23"
+  prev_go_version: "~1.22"
+  CGO_ENABLED: "0"
   # This needs to match whatever Netlify supports.
   # Also defined in Pipfile.
-  python_version: '~3.8'
+  python_version: "~3.8"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -31,7 +31,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '${{ env.go_version }}'
+          go-version: "${{ env.go_version }}"
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6.1.1
@@ -84,13 +84,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '${{ env.go_version }}'
+          go-version: "${{ env.go_version }}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '${{ env.python_version }}'
-          cache: 'pipenv'
+          python-version: "${{ env.python_version }}"
+          cache: "pipenv"
 
       - name: Install pipenv
         run: pip3 install pipenv
@@ -109,14 +109,14 @@ jobs:
     needs: build-and-lint
     timeout-minutes: 15
     env:
-      CI_KERNEL_SELFTESTS: '/usr/src/linux/tools/testing/selftests/bpf'
+      CI_KERNEL_SELFTESTS: "/usr/src/linux/tools/testing/selftests/bpf"
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '${{ env.prev_go_version }}'
+          go-version: "${{ env.prev_go_version }}"
 
       - run: go install lmb.io/vimto@latest
       - run: go install gotest.tools/gotestsum@v1.8.1
@@ -149,20 +149,27 @@ jobs:
           name: Test Results (previous stable Go)
           path: junit.xml
 
+      - name: Upload coverage results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-out
+          path: coverage.out
+
   test-on-arm64:
     name: Run tests on arm64
     runs-on: ubuntu-22.04-arm64
     needs: build-and-lint
     timeout-minutes: 15
     env:
-      EBPF_TEST_IGNORE_VERSION: 'TestKprobeMulti,TestKprobeMultiErrors,TestKprobeMultiCookie,TestKprobeMultiProgramCall,TestHaveBPFLinkKprobeMulti,TestHaveProgramType/LircMode2'
+      EBPF_TEST_IGNORE_VERSION: "TestKprobeMulti,TestKprobeMultiErrors,TestKprobeMultiCookie,TestKprobeMultiProgramCall,TestHaveBPFLinkKprobeMulti,TestHaveProgramType/LircMode2"
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '${{ env.go_version }}'
+          go-version: "${{ env.go_version }}"
 
       - run: go install gotest.tools/gotestsum@v1.8.1
 
@@ -184,6 +191,13 @@ jobs:
         if: failure()
         run: |
           sudo dmesg
+
+      - name: Upload coverage results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-out
+          path: coverage.out
 
   vm-test:
     name: Run tests
@@ -209,7 +223,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '${{ env.go_version }}'
+          go-version: "${{ env.go_version }}"
 
       - run: go install gotest.tools/gotestsum@v1.8.1
       - run: go install lmb.io/vimto@latest
@@ -225,3 +239,42 @@ jobs:
         with:
           name: Test Results (${{ matrix.tag }})
           path: junit.xml
+
+      - name: Upload coverage results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-out
+          path: coverage.out
+
+  generate-coverage-report:
+    name: Generate Coverage Report
+    runs-on: ubuntu-latest
+    needs: [test-on-prev-go, test-on-arm64, vm-test]
+    timeout-minutes: 10
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "${{ env.go_version }}"
+
+      - name: Download coverage artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-out
+          path: coverage
+
+      - name: Merge coverage results
+        run: |
+          go get -u github.com/wadey/gocovmerge
+          gocovmerge coverage/* > merged-coverage.out
+
+      - name: Generate HTML coverage report
+        run: |
+          go tool cover -html=merged-coverage.out -o coverage.html
+
+      - name: Upload coverage HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.html
